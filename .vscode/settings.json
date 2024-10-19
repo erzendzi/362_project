@@ -1,0 +1,10 @@
+{
+    "files.associations": {
+        "tty.h": "c",
+        "fifo.h": "c",
+        "type_traits": "c",
+        "stdint.h": "c",
+        "string.h": "c",
+        "ff.h": "c"
+    }
+}
