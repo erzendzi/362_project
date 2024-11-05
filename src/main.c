@@ -17,6 +17,7 @@
 #include "ff.h"
 #include "lcd.h"
 #include <stdlib.h> // For malloc and free
+#include <math.h>   // for M_PI
 
 // FATFS Object
 FATFS fs_storage;
@@ -439,6 +440,223 @@ void draw_bmp_to_lcd(const char *filename, BITMAPFILEHEADER *file_header, BITMAP
     f_close(&bmp_file);
 }
 
+void enable_ports_audio(void) {
+    RCC->AHBENR |= RCC_AHBENR_GPIOAEN | RCC_AHBENR_GPIOBEN | RCC_AHBENR_GPIOCEN;
+
+    GPIOC->MODER &= ~(0xFFFF); // PC0-PC7 reset
+    GPIOC->MODER |= (0x55 << (4 * 2)); // PC4-PC7 outputs
+
+    GPIOC->OTYPER |= (0xF << 4); // Config open drain PC4-PC7
+    
+    GPIOC->PUPDR &= ~(0xFF); // PC0-PC3 pupd reset
+    GPIOC->PUPDR |= (0x55); // PC0-PC3 pu
+}
+
+//=============================================================================
+// Part 2: Debounced keypad scanning.
+//=============================================================================
+
+uint8_t col; // the column being scanned
+
+void drive_column(int);   // energize one of the column outputs
+int  read_rows();         // read the four row inputs
+void update_history(int col, int rows); // record the buttons of the driven column
+char get_key_event(void); // wait for a button event (press or release)
+char get_keypress(void);  // wait for only a button press event.
+float getfloat(void);     // read a floating-point number from keypad
+void show_keys(void);     // demonstrate get_key_event()
+
+//============================================================================
+// The Timer 7 ISR
+//============================================================================
+// Write the Timer 7 ISR here.  Be sure to give it the right name.
+void TIM7_IRQHandler() {
+    TIM7->SR &= ~TIM_SR_UIF;
+
+    int rows = read_rows();
+    update_history(col, rows);
+    col = (col + 1) & 3;
+    drive_column(col);
+}
+
+//============================================================================
+// init_tim7()
+//============================================================================
+void init_tim7(void) {
+    RCC->APB1ENR |= RCC_APB1ENR_TIM7EN;
+
+    TIM7->PSC = 47; // prescale to 1 MHz
+    TIM7->ARR = 999; // reload set to 1 kHz
+
+    TIM7->DIER |= TIM_DIER_UIE;
+    NVIC_EnableIRQ(TIM7_IRQn);
+    TIM7->CR1 |= TIM_CR1_CEN;
+}
+
+//=============================================================================
+// Part 3: Analog-to-digital conversion for a volume level.
+//=============================================================================
+uint32_t volume = 2048;
+
+//============================================================================
+// setup_adc()
+//============================================================================
+void setup_adc(void) {
+    RCC->AHBENR |= RCC_AHBENR_GPIOAEN;
+
+    GPIOA->MODER |= (0x3 << (2 * 1)); // Set PA1 analog
+    
+    RCC->APB2ENR |= RCC_APB2ENR_ADCEN;
+    RCC->CR2 |= RCC_CR2_HSI14ON;
+
+    while(!(RCC->CR2 & RCC_CR2_HSI14RDY)) {}
+
+    ADC1->CR |= ADC_CR_ADEN;
+
+    while (!(ADC1->ISR & ADC_ISR_ADRDY)) {}
+    
+    ADC1->CHSELR = ADC_CHSELR_CHSEL1;
+
+    while(!(ADC1->ISR & ADC_ISR_ADRDY)) {}
+}
+
+//============================================================================
+// Varables for boxcar averaging.
+//============================================================================
+#define BCSIZE 32
+int bcsum = 0;
+int boxcar[BCSIZE];
+int bcn = 0;
+
+//============================================================================
+// Timer 2 ISR
+//============================================================================
+// Write the Timer 2 ISR here.  Be sure to give it the right name.
+void TIM2_IRQHandler() {
+    TIM2->SR &= ~TIM_SR_UIF;
+    ADC1->CR |= ADC_CR_ADSTART;
+
+    while(!(ADC1->ISR & ADC_ISR_EOC)) {}
+
+    bcsum -= boxcar[bcn];
+    bcsum += boxcar[bcn] = ADC1->DR;
+    bcn += 1;
+    if (bcn >= BCSIZE)
+        bcn = 0;
+    volume = bcsum / BCSIZE;
+}
+
+
+//============================================================================
+// init_tim2()
+//============================================================================
+void init_tim2(void) {
+    RCC->APB1ENR |= RCC_APB1ENR_TIM2EN;
+
+    TIM2->PSC = 47999; // Prescale down to 1 kHz
+    TIM2->ARR = 99; //reload to 10 Hz
+
+    TIM2->DIER |= TIM_DIER_UIE;
+    NVIC_EnableIRQ(TIM2_IRQn);
+    TIM2->CR1 |= TIM_CR1_CEN;
+
+    NVIC_SetPriority(TIM2_IRQn, 3);
+}
+
+// Parameters for the wavetable size and expected synthesis rate.
+#define N 1000
+#define RATE 20000
+short int wavetable[N];
+int step0 = 0;
+int offset0 = 0;
+int step1 = 0;
+int offset1 = 0;
+
+//===========================================================================
+// init_wavetable()
+// Write the pattern for a complete cycle of a sine wave into the
+// wavetable[] array.
+//===========================================================================
+void init_wavetable(void) {
+    for(int i=0; i < N; i++)
+        wavetable[i] = 32767 * sin(2 * M_PI * i / N);
+}
+
+//============================================================================
+// set_freq()
+//============================================================================
+void set_freq(int chan, float f) {
+    if (chan == 0) {
+        if (f == 0.0) {
+            step0 = 0;
+            offset0 = 0;
+        } else
+            step0 = (f * N / RATE) * (1<<16);
+    }
+    if (chan == 1) {
+        if (f == 0.0) {
+            step1 = 0;
+            offset1 = 0;
+        } else
+            step1 = (f * N / RATE) * (1<<16);
+    }
+}
+
+//============================================================================
+// setup_dac()
+//============================================================================
+void setup_dac(void) {
+    RCC->AHBENR |= RCC_AHBENR_GPIOAEN;
+
+    GPIOA->MODER |= (0x3 << (4 * 2));
+
+    RCC->APB1ENR |= RCC_APB1ENR_DACEN;
+
+    DAC->CR &= ~DAC_CR_TSEL1; // Sets to correct 000
+
+    DAC->CR |= DAC_CR_TEN1;
+    DAC->CR |= DAC_CR_EN1;
+}
+
+//============================================================================
+// Timer 6 ISR
+//============================================================================
+// Write the Timer 6 ISR here.  Be sure to give it the right name.
+void TIM6_DAC_IRQHandler() {
+    TIM6->SR &= ~TIM_SR_UIF;
+
+    offset0 += step0;
+    offset1 += step1;
+
+    if (offset0 >= (N << 16)) {
+        offset0 -= (N << 16);
+    }
+    if (offset1 >= (N << 16)) {
+        offset1 -= (N << 16);
+    }
+
+    int samp = wavetable[offset0 >> 16] + wavetable[offset1 >> 16];
+    samp *= volume;
+    samp = (samp >> 17) + 2048;
+
+    DAC->DHR12R1 = samp & 0xFFF;
+}
+//============================================================================
+// init_tim6()
+//============================================================================
+void init_tim6(void) {
+    RCC->APB1ENR |= RCC_APB1ENR_TIM6EN;
+    
+    TIM6->PSC = (48000000 / (100 * RATE) - 1); // Calcualte scale based on core clock
+    TIM6->ARR = 99; // Convert scale to kHz
+
+    TIM6->CR2 &= ~TIM_CR2_MMS;
+    TIM6->CR2 |= TIM_CR2_MMS_1;
+
+    TIM6->DIER |= TIM_DIER_UIE;
+    NVIC_EnableIRQ(TIM6_DAC_IRQn);
+    TIM6->CR1 |= TIM_CR1_CEN;
+}
 
 int main() {
     internal_clock();
@@ -447,6 +665,13 @@ int main() {
     setbuf(stdin,0);
     setbuf(stdout,0);
     setbuf(stderr,0);
+    enable_ports_audio();
+    init_tim7();
+    setup_adc();
+    init_tim2();
+    init_wavetable();
+    setup_dac();
+    init_tim6();
     
     // Example: Toggle an LED to indicate success (assuming LED is connected to PA5)
     RCC->AHBENR |= RCC_AHBENR_GPIOCEN; // Enable GPIOA clock
@@ -494,6 +719,14 @@ int main() {
     draw_bmp_to_lcd(bmp_filename, &file_header, &info_header);
     //LCD_DrawString(0, 0, 0xFFFF, 0x0000, "I can't get the goose", 18, 0);
     //LCD_DrawString(0, 30, 0xFFFF, 0x0000, "on here but I love you!", 18, 0);
+
+    for(;;) {
+        char key = get_keypress();
+        if (key == 'A')
+            set_freq(0,getfloat());
+        if (key == 'B')
+            set_freq(1,getfloat());
+    }
     
 
     // Indicate success by toggling LED
