@@ -117,15 +117,14 @@ void USART3_8_IRQHandler(void) {
     }
 }
 
-void init_spi1_slow() {
+void init_spi1() {
     RCC->AHBENR |= RCC_AHBENR_GPIOBEN;
     RCC->APB2ENR |= RCC_APB2ENR_SPI1EN;
 
-    // Configure PB3, PB4, PB5 to Alternate Function (AF5)
-    GPIOB->MODER &= ~(0x3F << (3*2));
-    GPIOB->MODER |= 0x2A << (3*2);
-
-    GPIOB->AFR[0] &= ~((0xFFF << (3 * 4)));
+    // Configure PB3, PB5 to Alternate Function (AF0)
+    GPIOB->MODER &= ~((0x3 << (3*2)) | (0x3 << (5*2)));
+    GPIOB->MODER |= 0x2 << (3*2) | 0x2 << (5*2);
+    GPIOB->AFR[0] &= ~((0xF << (3 * 4)) | (0xF << (5 * 4)));
 
     // Disable SPI1 before configuration
     SPI1->CR1 &= ~SPI_CR1_SPE;
@@ -133,7 +132,7 @@ void init_spi1_slow() {
     // Configure SPI1
 
     SPI1->CR1 |= SPI_CR1_MSTR;       // Master mode
-    SPI1->CR1 |= SPI_CR1_BR_2 | SPI_CR1_BR_1 | SPI_CR1_BR_0;  // Baud rate divisor (max)
+    SPI1->CR1 |= SPI_CR1_BR_0;  // Baud rate divisor (max)
     
     SPI1->CR2 &= ~(0xF << SPI_CR2_DS_Pos);
     SPI1->CR2 |= 0x7 << SPI_CR2_DS_Pos; // 8-bit word size
@@ -143,9 +142,39 @@ void init_spi1_slow() {
 
     // Set FIFO reception threshold
     SPI1->CR2 |= SPI_CR2_FRXTH;
-
+    
     // Enable SPI1
     SPI1->CR1 |= SPI_CR1_SPE;
+}
+
+void init_spi2_slow() {
+    RCC->AHBENR |= RCC_AHBENR_GPIOBEN;
+    RCC->APB1ENR |= RCC_APB1ENR_SPI2EN;
+
+    // Configure PB13, PB14, PB15 to Alternate Function (AF0)
+    GPIOB->MODER &= ~(0x3F << (13*2));
+    GPIOB->MODER |= 0x2A << (13*2);
+    GPIOB->AFR[1] &= ~((0xFFF << (5 * 4)));
+
+    // Disable SPI1 before configuration
+    SPI2->CR1 &= ~SPI_CR1_SPE;
+
+    // Configure SPI2
+    
+    SPI2->CR1 |= SPI_CR1_MSTR;       // Master mode
+    SPI2->CR1 |= SPI_CR1_BR_2 | SPI_CR1_BR_1 | SPI_CR1_BR_0;  // Baud rate divisor (max)
+    
+    SPI2->CR2 &= ~(0xF << SPI_CR2_DS_Pos);
+    SPI2->CR2 |= 0x7 << SPI_CR2_DS_Pos; // 8-bit word size
+
+    SPI2->CR1 |= SPI_CR1_SSM;        // Software slave management
+    SPI2->CR1 |= SPI_CR1_SSI;       // Internal slave select
+
+    // Set FIFO reception threshold
+    SPI2->CR2 |= SPI_CR2_FRXTH;
+
+    // Enable SPI2
+    SPI2->CR1 |= SPI_CR1_SPE;
 }
 
 void enable_sdcard() {
@@ -163,7 +192,7 @@ void disable_sdcard() {
 }
 
 void init_sdcard_io() {
-    init_spi1_slow();
+    init_spi2_slow();
 
     // Configure PB2 as output
     GPIOB->MODER &= ~(0x3 << (2 * 2));
@@ -174,28 +203,32 @@ void init_sdcard_io() {
 }
 
 void sdcard_io_high_speed() {
-    // Disable SPI1
-    SPI1->CR1 &= ~SPI_CR1_SPE;
+    // Disable SPI2
+    SPI2->CR1 &= ~SPI_CR1_SPE;
 
     // Set Baud Rate to 12 MHz
-    SPI1->CR1 &= ~SPI_CR1_BR;
-    SPI1->CR1 |= SPI_CR1_BR_0; // BR[2:0] = 0b001
+    SPI2->CR1 &= ~SPI_CR1_BR;
+    SPI2->CR1 |= SPI_CR1_BR_0; // BR[2:0] = 0b001
 
     // Re-enable SPI1
-    SPI1->CR1 |= SPI_CR1_SPE;
+    SPI2->CR1 |= SPI_CR1_SPE;
 }
 
 void init_lcd_spi() {
-    RCC->AHBENR |= RCC_AHBENR_GPIOBEN;
+    RCC->AHBENR |= RCC_AHBENR_GPIOBEN | RCC_AHBENR_GPIOAEN;
 
-    // Configure PB8, PB11, PB14 as outputs
-    GPIOB->MODER &= ~((3 << (8 * 2)) | (3 << (11 * 2)) | (3 << (14 * 2)));
-    GPIOB->MODER |= ((1 << (8 * 2)) | (1 << (11 * 2)) | (1 << (14 * 2)));
+    // Configure PB8, PB11, PA0 as outputs
+    GPIOB->MODER &= ~((3 << (8 * 2)) | (3 << (11 * 2)));
+    GPIOB->MODER |= ((1 << (8 * 2)) | (1 << (11 * 2)));
+    GPIOA->MODER &= ~0x3;
+    GPIOA->MODER |= 0x1;
 
-    // Initialize SPI1
-    init_spi1_slow();
+    // Initialize SPI1 for LCD
+    init_spi1();
+    
 
-    // Increase SPI1 speed
+    init_spi2_slow();
+    // Increase SPI2 speed
     sdcard_io_high_speed();
 
 }
@@ -273,10 +306,12 @@ void DMA1_Channel3_IRQHandler(void) {
 void mount_sd_card() {
     FATFS *fs = &fs_storage;
     if (fs->id != 0) {
+        print_error(FR_DISK_ERR, "Already mounted.");
         return;
     }
     int res = f_mount(fs, "", 1);
-    if (res != FR_OK){}
+    if (res != FR_OK)
+        print_error(res, "Error occurred while mounting");
 }
 
 void read_bmp_header(const char *filename, BITMAPFILEHEADER *file_header, BITMAPV5HEADER *info_header) {
@@ -417,13 +452,13 @@ int main() {
     RCC->AHBENR |= RCC_AHBENR_GPIOCEN; // Enable GPIOA clock
     GPIOC->MODER &= ~(0x3 << (6 * 2));  // Set PC6 as output
     GPIOC->MODER |= (0x1 << (6 * 2));  // Set PC6 as output
+    GPIOC->ODR ^= (1 << 6);
 
     LCD_Setup();
-    mount_sd_card();
-
     LCD_Clear(0);
     //LCD_DrawFillRectangle(0,0,200,200,0x0f0f);
 
+    mount_sd_card();
     // Define the BMP file name (ensure this file exists on your SD card)
     const char *bmp_filename = "goose.bmp"; // Replace with your BMP file name
 
