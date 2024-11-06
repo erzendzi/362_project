@@ -115,6 +115,9 @@ void show_keys(void)
     }
 }
 
+//////////////////////////////////////////////////////////
+// REMOVE + EDIT FOR PROJECT
+
 // Read an entire floating-point number.
 float getfloat(void)
 {

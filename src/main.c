@@ -22,11 +22,12 @@
 // FATFS Object
 FATFS fs_storage;
 
+
+
 // USART5 FIFO Buffer Definitions (Assuming existing)
 #define FIFOSIZE 16
 char serfifo[FIFOSIZE];
 int seroffset = 0;
-
 
 void internal_clock();
 
@@ -315,131 +316,6 @@ void mount_sd_card() {
         print_error(res, "Error occurred while mounting");
 }
 
-void read_bmp_header(const char *filename, BITMAPFILEHEADER *file_header, BITMAPV5HEADER *info_header) {
-    FIL bmp_file;            // File object
-    FRESULT fr;             // FatFS return code
-    UINT br;                // Bytes read
-
-    // Open the BMP file in binary read mode
-    fr = f_open(&bmp_file, filename, FA_READ);
-    if (fr != FR_OK) {
-        return;
-    }
-
-    // Read BITMAPFILEHEADER
-    fr = f_read(&bmp_file, file_header, sizeof(BITMAPFILEHEADER), &br);
-    if (fr != FR_OK || br != sizeof(BITMAPFILEHEADER)) {
-        f_close(&bmp_file);
-        return;
-    }
-
-    // Validate BMP signature ('BM')
-    if (file_header->bfType != 0x4D42) { // 'BM' in little endian
-        f_close(&bmp_file);
-        return;
-    }
-
-    // Read BITMAPV5HEADER
-    fr = f_read(&bmp_file, info_header, sizeof(BITMAPV5HEADER), &br);
-    if (fr != FR_OK || br != sizeof(BITMAPV5HEADER)) {
-        f_close(&bmp_file);
-        return;
-    }
-
-    // Close the file as we've read the necessary headers
-    f_close(&bmp_file);
-
-    return;
-}
-
-/**
- * @brief Converts 24-bit RGB color to 16-bit RGB565 format.
- * 
- * @param red   8-bit red component.
- * @param green 8-bit green component.
- * @param blue  8-bit blue component.
- * @return uint16_t RGB565 representation of the color.
- */
-uint16_t RGB24_to_RGB565(uint8_t red, uint8_t green, uint8_t blue) {
-    return ((red & 0xF8) << 8) | ((green & 0xFC) << 3) | (blue >> 3);
-}
-
-/**
- * @brief Draws a BMP image to the LCD.
- * 
- * @param filename     The name of the BMP file to display.
- * @param file_header  Pointer to the BMP file header.
- * @param info_header  Pointer to the BMP info header.
- */
-void draw_bmp_to_lcd(const char *filename, BITMAPFILEHEADER *file_header, BITMAPV5HEADER *info_header) {
-    FIL bmp_file;
-    FRESULT fr;
-    UINT br;
-
-    // Open the BMP file
-    fr = f_open(&bmp_file, filename, FA_READ);
-    if (fr != FR_OK) {
-        printf("Failed to open BMP file.\n");
-        return;
-    }
-
-    // Move the file pointer to the pixel data offset
-    fr = f_lseek(&bmp_file, file_header->bfOffBits);
-    if (fr != FR_OK) {
-        printf("Failed to seek to pixel data. Error code: %d\n", fr);
-        f_close(&bmp_file);
-        return;
-    }
-
-    // Get image dimensions
-    int width = info_header->biWidth;
-    int height = info_header->biHeight;
-    int bits_per_pixel = info_header->biBitCount;
-    int compression = info_header->biCompression;
-
-    if (bits_per_pixel != 24 || compression != 0) {
-        printf("Unsupported BMP format. Only 24-bit uncompressed BMPs are supported.\n");
-        f_close(&bmp_file);
-        return;
-    }
-
-    // Calculate the padding for each row (each row is padded to a multiple of 4 bytes)
-    int row_stride = (width * 3 + 3) & ~3;
-
-    uint8_t row_buffer[row_stride]; // Buffer to hold one row of BMP data
-    uint16_t lcd_buffer[width];     // Buffer to hold one row of RGB565 data
-
-    // Initialize the LCD window to match the BMP size
-    LCD_SetWindow(0, 0, width - 1, height - 1);
-
-    // Iterate over each row (BMP files are stored bottom-to-top)
-    for (int y = height - 1; y >= 0; y--) {
-        fr = f_read(&bmp_file, row_buffer, row_stride, &br);
-        if (fr != FR_OK || br != row_stride) {
-            printf("Failed to read pixel data. Error code: %d\n", fr);
-            f_close(&bmp_file);
-            return;
-        }
-
-        // Convert each pixel from RGB24 to RGB565
-        for (int x = 0; x < width; x++) {
-            uint8_t blue  = row_buffer[x * 3];
-            uint8_t green = row_buffer[x * 3 + 1];
-            uint8_t red   = row_buffer[x * 3 + 2];
-            lcd_buffer[x] = RGB24_to_RGB565(red, green, blue);
-        }
-
-        // Send the row to the LCD
-        //LCD_WriteData16_Prepare();
-        for (int x = 0; x < width; x++) {
-            LCD_DrawPoint(x, y, lcd_buffer[x]);
-        }
-        //LCD_WriteData16_End();
-    }
-
-    f_close(&bmp_file);
-}
-
 void enable_ports_audio(void) {
     RCC->AHBENR |= RCC_AHBENR_GPIOAEN | RCC_AHBENR_GPIOBEN | RCC_AHBENR_GPIOCEN;
 
@@ -658,6 +534,27 @@ void init_tim6(void) {
     TIM6->CR1 |= TIM_CR1_CEN;
 }
 
+// Structures to hold BMP header information
+BITMAPFILEHEADER file_header;
+BITMAPV5HEADER info_header;
+
+void waveform_select(char *bmp_filename) {
+
+    read_bmp_header(bmp_filename, &file_header, &info_header);
+    display_bmp_information(bmp_filename, &file_header, &info_header);
+    draw_bmp_to_lcd(bmp_filename, &file_header, &info_header);
+
+}
+
+char *bmp_filenames[4] = {
+    "img_w_1.bmp",
+    "img_w_2.bmp",
+    "img_w_3.bmp",
+    "img_w_4.bmp"
+};
+
+const char *loading = "Loading...";
+
 int main() {
     internal_clock();
     init_usart5();
@@ -672,60 +569,52 @@ int main() {
     init_wavetable();
     setup_dac();
     init_tim6();
-    
-    // Example: Toggle an LED to indicate success (assuming LED is connected to PA5)
-    RCC->AHBENR |= RCC_AHBENR_GPIOCEN; // Enable GPIOA clock
-    GPIOC->MODER &= ~(0x3 << (6 * 2));  // Set PC6 as output
-    GPIOC->MODER |= (0x1 << (6 * 2));  // Set PC6 as output
-    GPIOC->ODR ^= (1 << 6);
-
     LCD_Setup();
     LCD_Clear(0);
     //LCD_DrawFillRectangle(0,0,200,200,0x0f0f);
-
     mount_sd_card();
-    // Define the BMP file name (ensure this file exists on your SD card)
-    const char *bmp_filename = "goose.bmp"; // Replace with your BMP file name
+    
+    // Example: Toggle an LED to indicate success (assuming LED is connected to PA5)
+    //RCC->AHBENR |= RCC_AHBENR_GPIOCEN; // Enable GPIOA clock
+    GPIOC->MODER &= ~(0x3 << (8 * 2));  // Set PC6 as output
+    GPIOC->MODER |= (0x1 << (8 * 2));  // Set PC6 as output
+    GPIOC->BSRR = (1 << 8);
 
-    // Structures to hold BMP header information
-    BITMAPFILEHEADER file_header;
-    BITMAPV5HEADER info_header;
-
-    read_bmp_header(bmp_filename, &file_header, &info_header);
     // LCD is 320X240
 
-    // Print BMP File Header Information
-    printf("BMP File Type: 0x%X\n", file_header.bfType);
-    printf("BMP File Size: %u bytes\n", file_header.bfSize);
-    printf("BMP Reserved1: %u\n", file_header.bfReserved1);
-    printf("BMP Reserved2: %u\n", file_header.bfReserved2);
-    printf("BMP Data Offset: %u bytes\n\n", file_header.bfOffBits);
-
-// Print BMP Info Header Information
-    printf("BMP Info Header Size: %u bytes\n", info_header.biSize);
-    printf("Image Width: %d pixels\n", info_header.biWidth);
-    printf("Image Height: %d pixels\n", info_header.biHeight);
-    printf("Number of Planes: %u\n", info_header.biPlanes);
-    printf("Bits per Pixel: %u\n", info_header.biBitCount);
-    printf("Compression Type: %u\n", info_header.biCompression);
-    printf("Image Size: %u bytes\n", info_header.biSizeImage);
-    printf("Horizontal Resolution: %d pixels/meter\n", info_header.biXPelsPerMeter);
-    printf("Vertical Resolution: %d pixels/meter\n", info_header.biYPelsPerMeter);
-    printf("Number of Colors Used: %u\n", info_header.biClrUsed);
-    printf("Number of Important Colors: %u\n", info_header.biClrImportant);
-
-
-    //LCD_DrawPicture(0, 0, bmp_filename);
-    draw_bmp_to_lcd(bmp_filename, &file_header, &info_header);
-    //LCD_DrawString(0, 0, 0xFFFF, 0x0000, "I can't get the goose", 18, 0);
-    //LCD_DrawString(0, 30, 0xFFFF, 0x0000, "on here but I love you!", 18, 0);
+    //char *bmp_filename = bmp_filenames[0];
 
     for(;;) {
         char key = get_keypress();
-        if (key == 'A')
-            set_freq(0,getfloat());
-        if (key == 'B')
-            set_freq(1,getfloat());
+        if (key == 'A'){
+            LCD_DrawString(0, 305, 0xFFFF, 0, loading, 12, 1);
+
+            waveform_select(bmp_filenames[0]);
+
+            LCD_DrawString(0, 305, 0x0000, 0, loading, 12, 1);
+        } else if(key == 'B'){
+            LCD_DrawString(0, 305, 0xFFFF, 0, loading, 12, 1);
+
+            waveform_select(bmp_filenames[1]);
+
+            LCD_DrawString(0, 305, 0x0000, 0, loading, 12, 1);
+        } else if(key == 'C'){
+            LCD_DrawString(0, 305, 0xFFFF, 0, loading, 12, 1);
+
+            waveform_select(bmp_filenames[2]);
+
+            LCD_DrawString(0, 305, 0x0000, 0, loading, 12, 1);
+        } else if(key == 'D'){
+            LCD_DrawString(0, 305, 0xFFFF, 0, loading, 12, 1);
+
+            waveform_select(bmp_filenames[3]);
+
+            LCD_DrawString(0, 305, 0x0000, 0, loading, 12, 1);
+        } else {}
+
+        //    set_freq(0,getfloat());
+        //if (key == 'B')
+        //    set_freq(1,getfloat());
     }
     
 
