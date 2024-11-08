@@ -61,17 +61,37 @@ char pop_queue() {
     return tmp;
 }
 
+uint8_t debounced_state[16] = {0}; // Holds the debounced state of each key
+
 void update_history(int c, int rows)
 {
-    // We used to make students do this in assembly language.
     for(int i = 0; i < 4; i++) {
-        hist[4*c+i] = (hist[4*c+i]<<1) + ((rows>>i)&1);
-        if (hist[4*c+i] == 0x01)
-            push_queue(0x80 | keymap[4*c+i]);
-        if (hist[4*c+i] == 0xfe)
-            push_queue(keymap[4*c+i]);
+        int idx = 4 * c + i;
+        hist[idx] = (hist[idx] << 1) | ((rows >> i) & 1);
+
+        if(hist[idx] == 0xFF && debounced_state[idx] == 0) {
+            // Key has been pressed
+            debounced_state[idx] = 1;
+            push_queue(0x80 | keymap[idx]);
+        } else if(hist[idx] == 0x00 && debounced_state[idx] == 1) {
+            // Key has been released
+            debounced_state[idx] = 0;
+            push_queue(keymap[idx]);
+        }
     }
 }
+
+//void update_history(int c, int rows)
+//{
+    // We used to make students do this in assembly language.
+//    for(int i = 0; i < 4; i++) {
+//        hist[4*c+i] = (hist[4*c+i]<<1) + ((rows>>i)&1);
+//        if (hist[4*c+i] == 0x01)
+//            push_queue(0x80 | keymap[4*c+i]);
+//        if (hist[4*c+i] == 0xfe)
+//            push_queue(keymap[4*c+i]);
+//    }
+//}
 
 void drive_column(int c)
 {
