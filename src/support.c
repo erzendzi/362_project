@@ -2,11 +2,13 @@
 #include <string.h> // for memmove()
 #include <stdio.h> // for memmove()
 
-// 16 history bytes.  Each byte represents the last 8 samples of a button.
-uint8_t hist[16];
-char queue[2];  // A two-entry queue of button press/release events.
-int qin;        // Which queue entry is next for input
-int qout;       // Which queue entry is next for output
+// Define a larger queue size
+#define QUEUE_SIZE 16
+
+// Initialize the queue with QUEUE_SIZE
+char queue[QUEUE_SIZE];  // Queue to hold key events
+int qin = 0;              // Index for the next input
+int qout = 0;             // Index for the next output
 
 const char keymap[] = "DCBA#9630852*741";
 
@@ -49,32 +51,64 @@ const char font[] = {
     0x54, 0x5c, 0x73, 0x7b, 0x50, 0x6d, 0x78, 0x1c, 0x00, 0x00, 0x00, 0x6e, 0x00
 };
 
-void push_queue(int n) {
-    queue[qin] = n;
-    qin ^= 1;
+// Existing variables
+uint8_t hist[16];
+uint8_t debounced_state[16] = {0}; // Initialize to 0
+
+// Function to check if the queue is full
+int is_queue_full() {
+    return ((qin + 1) % QUEUE_SIZE) == qout;
 }
 
+// Function to check if the queue is empty
+int is_queue_empty() {
+    return qin == qout;
+}
+
+// Function to push an event to the queue
+void push_queue(char n) {
+    if (!is_queue_full()) {
+        queue[qin] = n;
+        qin = (qin + 1) % QUEUE_SIZE;
+
+        if (n & 0x80) { // Key press
+            printf("Key Pressed: %c\n", n & 0x7F);
+        } else { // Key release
+            printf("Key Released: %c\n", n);
+        }
+    } else {
+        // Handle queue overflow
+        // For simplicity, we'll ignore the new event.
+        // Alternatively, you can implement flags or counters to track lost events.
+    }
+}
+
+// Function to pop an event from the queue
 char pop_queue() {
-    char tmp = queue[qout];
-    queue[qout] = 0;
-    qout ^= 1;
-    return tmp;
+    if (!is_queue_empty()) {
+        char tmp = queue[qout];
+        qout = (qout + 1) % QUEUE_SIZE;
+        return tmp;
+    }
+    return 0; // Or some sentinel value indicating the queue is empty
 }
-
-uint8_t debounced_state[16] = {0}; // Holds the debounced state of each key
 
 void update_history(int c, int rows)
 {
-    for(int i = 0; i < 4; i++) {
+    for (int i = 0; i < 4; i++) {
         int idx = 4 * c + i;
-        hist[idx] = (hist[idx] << 1) | ((rows >> i) & 1);
 
-        if(hist[idx] == 0xFF && debounced_state[idx] == 0) {
-            // Key has been pressed
+        // Update history for each key independently
+        hist[idx] = (hist[idx] << 1) | ((rows >> i) & 0x1);
+
+        // Check if key has been consistently pressed for 8 scans (debounced)
+        if ((hist[idx] & 0xFF) == 0xFF && debounced_state[idx] == 0) {
             debounced_state[idx] = 1;
             push_queue(0x80 | keymap[idx]);
-        } else if(hist[idx] == 0x00 && debounced_state[idx] == 1) {
-            // Key has been released
+        }
+
+        // Check if key has been consistently released for 8 scans (debounced)
+        if ((hist[idx] & 0xFF) == 0x00 && debounced_state[idx] == 1) {
             debounced_state[idx] = 0;
             push_queue(keymap[idx]);
         }
@@ -106,10 +140,10 @@ int read_rows()
 char get_key_event(void) {
     for(;;) {
         asm volatile ("wfi");   // wait for an interrupt
-       if (queue[qout] != 0)
-            break;
+        if (!is_queue_empty()) {
+            return pop_queue();
+        }
     }
-    return pop_queue();
 }
 
 char get_keypress() {

@@ -395,36 +395,21 @@ const float note_freqs[NVOICES] = {
     493.88  // B4
 };
 
-//===========================================================================
-void init_sine_table() {
-    for (int i = 0; i < N; i++) {
-        wavetable[i] = 32767 * sin(2 * M_PI * i / N);
-    }
-}
+//============================================================================
+// ADSR Envelope Parameters and Structures
+//============================================================================
+#define ATTACK_TIME (RATE * 0.01)    // 10ms
+#define DECAY_TIME  (RATE * 0.1)     // 100ms
+#define SUSTAIN_LEVEL 0.7f           // 70% amplitude
+#define RELEASE_TIME (RATE * 0.1)    // 100ms
 
-void init_square_table() {
-    for (int i = 0; i < N; i++) {
-        if (i < N/2)
-            wavetable[i] = 32767;
-        else
-            wavetable[i] = -32767;
-    }
-}
+typedef struct {
+    int state;       // 0=off, 1=attack, 2=decay, 3=sustain, 4=release
+    int count;       // sample count within the current state
+    float amplitude; // current amplitude (0.0 to 1.0)
+} ADSR;
 
-void init_triangle_table() {
-    for (int i = 0; i < N; i++) {
-        if (i < N/2)
-            wavetable[i] = -32767 + (2 * 32767 * i) / (N/2);
-        else
-            wavetable[i] = 32767 - (2 * 32767 * (i - N/2)) / (N/2);
-    }
-}
-
-void init_sawtooth_table() {
-    for (int i = 0; i < N; i++) {
-        wavetable[i] = -32767 + (2 * 32767 * i) / N;
-    }
-}
+ADSR adsr[NVOICES];
 
 //============================================================================
 // setup_dac()
@@ -450,14 +435,64 @@ void TIM6_DAC_IRQHandler() {
     TIM6->SR &= ~TIM_SR_UIF;
 
     int samp = 0;
+    int active_voices = 0; // Count of active voices
+
     for (int i = 0; i < NVOICES; i++) {
         if (step[i] != 0) {
-            offset[i] += step[i];
-            if (offset[i] >= (N << 16)) {
-                offset[i] -= (N << 16);
+            // Update ADSR envelope
+            switch(adsr[i].state) {
+                case 0: // Off
+                    adsr[i].amplitude = 0.0f;
+                    break;
+                case 1: // Attack
+                    adsr[i].count++;
+                    adsr[i].amplitude = (float)adsr[i].count / ATTACK_TIME;
+                    if (adsr[i].amplitude >= 1.0f) {
+                        adsr[i].amplitude = 1.0f;
+                        adsr[i].count = 0;
+                        adsr[i].state = 2; // Move to decay
+                    }
+                    break;
+                case 2: // Decay
+                    adsr[i].count++;
+                    adsr[i].amplitude = 1.0f - (1.0f - SUSTAIN_LEVEL) * ((float)adsr[i].count / DECAY_TIME);
+                    if (adsr[i].count >= DECAY_TIME) {
+                        adsr[i].amplitude = SUSTAIN_LEVEL;
+                        adsr[i].count = 0;
+                        adsr[i].state = 3; // Move to sustain
+                    }
+                    break;
+                case 3: // Sustain
+                    // Maintain sustain level
+                    adsr[i].amplitude = SUSTAIN_LEVEL;
+                    break;
+                case 4: // Release
+                    adsr[i].count++;
+                    adsr[i].amplitude *= 1.0f - (1.0f / RELEASE_TIME);
+                    if (adsr[i].count >= RELEASE_TIME || adsr[i].amplitude <= 0.0f) {
+                        // Note is off
+                        adsr[i].state = 0;
+                        adsr[i].amplitude = 0.0f;
+                        step[i] = 0;
+                        offset[i] = 0;
+                        continue; // Skip to next voice
+                    }
+                    break;
             }
-            samp += wavetable[offset[i] >> 16];
+
+            if (adsr[i].state != 0) {
+                offset[i] += step[i];
+                if (offset[i] >= (N << 16)) {
+                    offset[i] -= (N << 16);
+                }
+                samp += (int)(adsr[i].amplitude * wavetable[offset[i] >> 16]);
+                active_voices++; // Increment active voices count
+            }
         }
+    }
+
+    if (active_voices > 1) {
+        samp = samp / active_voices; // Average the sample
     }
 
     samp = samp * volume;
@@ -470,6 +505,7 @@ void TIM6_DAC_IRQHandler() {
 
     DAC->DHR12R1 = samp & 0xFFF;
 }
+
 //============================================================================
 // init_tim6()
 //============================================================================
@@ -508,6 +544,31 @@ char *bmp_filenames[4] = {
 
 const char *loading = "Loading...";
 
+//============================================================================
+// Function to Load Waveform from SD Card
+//============================================================================
+int load_waveform_from_sdcard(const char *filename) {
+    FIL file;
+    UINT bytes_read;
+    FRESULT res;
+
+    res = f_open(&file, filename, FA_READ);
+    if (res != FR_OK) {
+        printf("Failed to open waveform file %s\n", filename);
+        return -1;
+    }
+
+    res = f_read(&file, wavetable, N * sizeof(short int), &bytes_read);
+    if (res != FR_OK || bytes_read != N * sizeof(short int)) {
+        printf("Failed to read waveform data from %s\n", filename);
+        f_close(&file);
+        return -1;
+    }
+
+    f_close(&file);
+    return 0;
+}
+
 int main() {
     internal_clock();
     init_usart5();
@@ -520,7 +581,7 @@ int main() {
     setup_adc();
     init_tim2();
     //init_wavetable();
-    init_sine_table(); // Initialize to sine wave by default
+    //init_sine_table(); // Initialize to sine wave by default
     setup_dac();
     init_tim6();
     LCD_Setup();
@@ -539,9 +600,13 @@ int main() {
     //char *bmp_filename = bmp_filenames[0];
     // command_shell();
 
+    // Initialize voices
     for(int i = 0; i < NVOICES; i++) {
         step[i] = 0;
         offset[i] = 0;
+        adsr[i].state = 0;
+        adsr[i].count = 0;
+        adsr[i].amplitude = 0.0f;
     }
 
     for(;;) {
@@ -552,33 +617,33 @@ int main() {
         if (key == 'A') {
             if (is_press) {
                 LCD_DrawString(0, 305, 0xFFFF, 0, loading, 12, 1);
-                init_sine_table();
+                load_waveform_from_sdcard("sine.bin");
                 waveform_select(bmp_filenames[0]);
                 LCD_DrawString(0, 305, 0x0000, 0, loading, 12, 1);
             }
         } else if (key == 'B') {
             if (is_press) {
                 LCD_DrawString(0, 305, 0xFFFF, 0, loading, 12, 1);
-                init_square_table();
+                load_waveform_from_sdcard("square.bin");
                 waveform_select(bmp_filenames[1]);
                 LCD_DrawString(0, 305, 0x0000, 0, loading, 12, 1);
             }
         } else if (key == 'C') {
             if (is_press) {
                 LCD_DrawString(0, 305, 0xFFFF, 0, loading, 12, 1);
-                init_triangle_table();
+                load_waveform_from_sdcard("triangle.bin");
                 waveform_select(bmp_filenames[2]);
                 LCD_DrawString(0, 305, 0x0000, 0, loading, 12, 1);
             }
         } else if (key == 'D') {
             if (is_press) {
                 LCD_DrawString(0, 305, 0xFFFF, 0, loading, 12, 1);
-                init_sawtooth_table();
+                load_waveform_from_sdcard("sawtooth.bin");
                 waveform_select(bmp_filenames[3]);
                 LCD_DrawString(0, 305, 0x0000, 0, loading, 12, 1);
             }
         } else {
-            // Handle other keys
+            // Handle other keys (notes)
             int idx = -1;
             for (int i = 0; i < NVOICES; i++) {
                 if (key_note_map[i] == key) {
@@ -588,12 +653,21 @@ int main() {
             }
             if (idx != -1) {
                 if (is_press) {
-                    // Start playing note
-                    step[idx] = (note_freqs[idx] * N / RATE) * (1<<16);
+                    // Start playing note with ADSR envelope
+                    if (step[idx] == 0) { // Prevent re-initializing if already playing
+                        step[idx] = (int)((note_freqs[idx] * N / RATE) * (1<<16));
+                        // Initialize ADSR envelope
+                        adsr[idx].state = 1; // Attack
+                        adsr[idx].count = 0;
+                        adsr[idx].amplitude = 0.0f;
+                    }
                 } else {
-                    // Stop playing note
-                    step[idx] = 0;
-                    offset[idx] = 0;
+                    // Start release phase
+                    if (adsr[idx].state != 0) {
+                        adsr[idx].state = 4; // Release
+                        adsr[idx].count = 0;
+                        // adsr[idx].amplitude remains as is
+                    }
                 }
             }
         }
