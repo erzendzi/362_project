@@ -104,17 +104,6 @@ char get_keypress() {
     return event & 0x7f;
 }
 
-void show_keys(void)
-{
-    char buf[] = "        ";
-    for(;;) {
-        char event = get_key_event();
-        memmove(buf, &buf[1], 7);
-        buf[7] = event;
-        //print(buf);
-    }
-}
-
 //////////////////////////////////////////////////////////
 // REMOVE + EDIT FOR PROJECT
 

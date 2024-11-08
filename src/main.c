@@ -22,8 +22,6 @@
 // FATFS Object
 FATFS fs_storage;
 
-
-
 // USART5 FIFO Buffer Definitions (Assuming existing)
 #define FIFOSIZE 16
 char serfifo[FIFOSIZE];
@@ -235,76 +233,6 @@ void init_lcd_spi() {
 
 }
 
-//===========================================================================
-/**
- * @brief Configures DMA1 Channel3 for SPI1_TX to transfer pixel data.
- * 
- * This function sets up DMA1 Channel3 to read from spi_buffer and write to SPI1's data register.
- * It configures the DMA channel for memory-to-peripheral transfer with incrementing memory address,
- * 8-bit data size, and no circular mode.
- * 
- * @param buffer Pointer to the data buffer to be transmitted via SPI1.
- * @param length Number of bytes to transfer.
- */
-//===========================================================================
-void spi1_setup_dma(uint8_t *buffer, uint16_t length) {
-    // Enable DMA1 clock
-    RCC->AHBENR |= RCC_AHBENR_DMA1EN;
-    
-    // Disable DMA Channel3 before configuring
-    DMA1_Channel3->CCR &= ~DMA_CCR_EN;
-    
-    // Configure DMA Channel3
-    DMA1_Channel3->CPAR = (uint32_t)&SPI1->DR; // Peripheral address: SPI1 Data Register
-    DMA1_Channel3->CMAR = (uint32_t)buffer;    // Memory address: buffer to send
-    DMA1_Channel3->CNDTR = length;            // Number of data items to transfer
-    
-    // Configure DMA Channel3
-    DMA1_Channel3->CCR &= ~(DMA_CCR_DIR | DMA_CCR_CIRC | DMA_CCR_PSIZE | DMA_CCR_MSIZE);
-    DMA1_Channel3->CCR |= DMA_CCR_MINC;       // Memory increment mode
-    DMA1_Channel3->CCR |= DMA_CCR_DIR;      // Read from memory (DIR=1)
-    DMA1_Channel3->CCR |= DMA_CCR_TCIE;       // Transfer complete interrupt (optional)
-    
-    // Set data size to 8 bits
-    // MSIZE and PSIZE are already cleared to 00 for 8-bit
-    
-    // Optionally, set priority
-    DMA1_Channel3->CCR |= DMA_CCR_PL_1; // High priority
-}
-
-//===========================================================================
-/**
- * @brief Enables DMA1 Channel3 to start the transfer.
- */
-//===========================================================================
-void spi1_enable_dma(void) {
-    // Enable SPI1_TX DMA requests
-    SPI1->CR2 |= SPI_CR2_TXDMAEN;
-    
-    // Enable DMA Channel3
-    DMA1_Channel3->CCR |= DMA_CCR_EN;
-}
-
-//===========================================================================
-/**
- * @brief DMA1 Channel3 Transfer Complete Interrupt Handler.
- * 
- * Optional: Handle the end of DMA transfer, e.g., to toggle a GPIO pin or notify the main program.
- */
-//===========================================================================
-void DMA1_Channel3_IRQHandler(void) {
-    if (DMA1->ISR & DMA_ISR_TCIF3) {
-        // Clear the transfer complete flag
-        DMA1->IFCR |= DMA_IFCR_CTCIF3;
-        
-        // Optionally, disable DMA and SPI1 TX DMA request if not in circular mode
-        DMA1_Channel3->CCR &= ~DMA_CCR_EN;
-        SPI1->CR2 &= ~SPI_CR2_TXDMAEN;
-        
-        // Add any post-transfer handling here (e.g., notify main loop)
-    }
-}
-
 void mount_sd_card() {
     FATFS *fs = &fs_storage;
     if (fs->id != 0) {
@@ -443,38 +371,58 @@ void init_tim2(void) {
 #define N 1000
 #define RATE 20000
 short int wavetable[N];
-int step0 = 0;
-int offset0 = 0;
-int step1 = 0;
-int offset1 = 0;
+
+
+// Define constants and arrays for multiple voices
+#define NVOICES 12
+int step[NVOICES] = {0};
+int offset[NVOICES] = {0};
+
+const char key_note_map[NVOICES] = {'1','2','3','4','5','6','7','8','9','*','0','#'};
+
+const float note_freqs[NVOICES] = {
+    261.63, // C4
+    277.18, // C#4
+    293.66, // D4
+    311.13, // D#4
+    329.63, // E4
+    349.23, // F4
+    369.99, // F#4
+    392.00, // G4
+    415.30, // G#4
+    440.00, // A4
+    466.16, // A#4
+    493.88  // B4
+};
 
 //===========================================================================
-// init_wavetable()
-// Write the pattern for a complete cycle of a sine wave into the
-// wavetable[] array.
-//===========================================================================
-void init_wavetable(void) {
-    for(int i=0; i < N; i++)
+void init_sine_table() {
+    for (int i = 0; i < N; i++) {
         wavetable[i] = 32767 * sin(2 * M_PI * i / N);
+    }
 }
 
-//============================================================================
-// set_freq()
-//============================================================================
-void set_freq(int chan, float f) {
-    if (chan == 0) {
-        if (f == 0.0) {
-            step0 = 0;
-            offset0 = 0;
-        } else
-            step0 = (f * N / RATE) * (1<<16);
+void init_square_table() {
+    for (int i = 0; i < N; i++) {
+        if (i < N/2)
+            wavetable[i] = 32767;
+        else
+            wavetable[i] = -32767;
     }
-    if (chan == 1) {
-        if (f == 0.0) {
-            step1 = 0;
-            offset1 = 0;
-        } else
-            step1 = (f * N / RATE) * (1<<16);
+}
+
+void init_triangle_table() {
+    for (int i = 0; i < N; i++) {
+        if (i < N/2)
+            wavetable[i] = -32767 + (2 * 32767 * i) / (N/2);
+        else
+            wavetable[i] = 32767 - (2 * 32767 * (i - N/2)) / (N/2);
+    }
+}
+
+void init_sawtooth_table() {
+    for (int i = 0; i < N; i++) {
+        wavetable[i] = -32767 + (2 * 32767 * i) / N;
     }
 }
 
@@ -501,19 +449,24 @@ void setup_dac(void) {
 void TIM6_DAC_IRQHandler() {
     TIM6->SR &= ~TIM_SR_UIF;
 
-    offset0 += step0;
-    offset1 += step1;
-
-    if (offset0 >= (N << 16)) {
-        offset0 -= (N << 16);
+    int samp = 0;
+    for (int i = 0; i < NVOICES; i++) {
+        if (step[i] != 0) {
+            offset[i] += step[i];
+            if (offset[i] >= (N << 16)) {
+                offset[i] -= (N << 16);
+            }
+            samp += wavetable[offset[i] >> 16];
+        }
     }
-    if (offset1 >= (N << 16)) {
-        offset1 -= (N << 16);
-    }
 
-    int samp = wavetable[offset0 >> 16] + wavetable[offset1 >> 16];
-    samp *= volume;
+    samp = samp * volume;
     samp = (samp >> 17) + 2048;
+
+    if (samp > 4095)
+        samp = 4095;
+    else if (samp < 0)
+        samp = 0;
 
     DAC->DHR12R1 = samp & 0xFFF;
 }
@@ -566,7 +519,8 @@ int main() {
     init_tim7();
     setup_adc();
     init_tim2();
-    init_wavetable();
+    //init_wavetable();
+    init_sine_table(); // Initialize to sine wave by default
     setup_dac();
     init_tim6();
     LCD_Setup();
@@ -583,46 +537,65 @@ int main() {
     // LCD is 320X240
 
     //char *bmp_filename = bmp_filenames[0];
+    // command_shell();
+
+    for(int i = 0; i < NVOICES; i++) {
+        step[i] = 0;
+        offset[i] = 0;
+    }
 
     for(;;) {
-        char key = get_keypress();
-        if (key == 'A'){
-            LCD_DrawString(0, 305, 0xFFFF, 0, loading, 12, 1);
+        char event = get_key_event();
+        char key = event & 0x7F;
+        int is_press = event & 0x80;
 
-            waveform_select(bmp_filenames[0]);
-
-            LCD_DrawString(0, 305, 0x0000, 0, loading, 12, 1);
-        } else if(key == 'B'){
-            LCD_DrawString(0, 305, 0xFFFF, 0, loading, 12, 1);
-
-            waveform_select(bmp_filenames[1]);
-
-            LCD_DrawString(0, 305, 0x0000, 0, loading, 12, 1);
-        } else if(key == 'C'){
-            LCD_DrawString(0, 305, 0xFFFF, 0, loading, 12, 1);
-
-            waveform_select(bmp_filenames[2]);
-
-            LCD_DrawString(0, 305, 0x0000, 0, loading, 12, 1);
-        } else if(key == 'D'){
-            LCD_DrawString(0, 305, 0xFFFF, 0, loading, 12, 1);
-
-            waveform_select(bmp_filenames[3]);
-
-            LCD_DrawString(0, 305, 0x0000, 0, loading, 12, 1);
-        } else {}
-
-        //    set_freq(0,getfloat());
-        //if (key == 'B')
-        //    set_freq(1,getfloat());
+        if (key == 'A') {
+            if (is_press) {
+                LCD_DrawString(0, 305, 0xFFFF, 0, loading, 12, 1);
+                init_sine_table();
+                waveform_select(bmp_filenames[0]);
+                LCD_DrawString(0, 305, 0x0000, 0, loading, 12, 1);
+            }
+        } else if (key == 'B') {
+            if (is_press) {
+                LCD_DrawString(0, 305, 0xFFFF, 0, loading, 12, 1);
+                init_square_table();
+                waveform_select(bmp_filenames[1]);
+                LCD_DrawString(0, 305, 0x0000, 0, loading, 12, 1);
+            }
+        } else if (key == 'C') {
+            if (is_press) {
+                LCD_DrawString(0, 305, 0xFFFF, 0, loading, 12, 1);
+                init_triangle_table();
+                waveform_select(bmp_filenames[2]);
+                LCD_DrawString(0, 305, 0x0000, 0, loading, 12, 1);
+            }
+        } else if (key == 'D') {
+            if (is_press) {
+                LCD_DrawString(0, 305, 0xFFFF, 0, loading, 12, 1);
+                init_sawtooth_table();
+                waveform_select(bmp_filenames[3]);
+                LCD_DrawString(0, 305, 0x0000, 0, loading, 12, 1);
+            }
+        } else {
+            // Handle other keys
+            int idx = -1;
+            for (int i = 0; i < NVOICES; i++) {
+                if (key_note_map[i] == key) {
+                    idx = i;
+                    break;
+                }
+            }
+            if (idx != -1) {
+                if (is_press) {
+                    // Start playing note
+                    step[idx] = (note_freqs[idx] * N / RATE) * (1<<16);
+                } else {
+                    // Stop playing note
+                    step[idx] = 0;
+                    offset[idx] = 0;
+                }
+            }
+        }
     }
-    
-
-    // Indicate success by toggling LED
-    //while(1) {
-    //    GPIOC->ODR ^= (1 << 6);        // Toggle PA5
-    //    for(uint32_t i = 0; i < 100000; i++); // Simple delay
-    //}
-
-    //command_shell();
 }
